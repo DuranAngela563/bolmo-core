@@ -60,3 +60,15 @@ site/
 core
 /dataset-cache/
 .venv/
+
+
+
+checkpoints/
+outputs/
+runs/
+logs/
+wandb/
+.cache/
+*.pt
+*.pth
+*.ckpt
