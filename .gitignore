@@ -59,10 +59,18 @@ site/
 /scratch/
 core
 /dataset-cache/
+.venv/
 
 
 
-/outputs/
-# Log files
+checkpoints/
+outputs/
+runs/
+logs/
 *.out
 *.err
+wandb/
+.cache/
+*.pt
+*.pth
+*.ckpt
