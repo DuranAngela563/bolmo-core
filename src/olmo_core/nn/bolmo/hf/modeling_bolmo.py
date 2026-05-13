@@ -891,6 +891,10 @@ class BolmoModel(BolmoPreTrainedModel):
         self.tokenizer_config = BolmoTokenizerConfig(**config.tokenizer_config)
         self._tokenizer = None
 
+        # Adaptive depth: when None, forward() uses the default path.
+        # Set via adaptive_depth.apply_depth_strategy().
+        self.global_backbone_strategy = None
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -906,6 +910,41 @@ class BolmoModel(BolmoPreTrainedModel):
             self._tokenizer = self.tokenizer_config.build()
 
         return self._tokenizer
+
+    def _run_global_layers(
+        self,
+        h_patch: torch.Tensor,
+        causal_mask_mapping: dict,
+        position_ids: torch.Tensor,
+        past_key_values: Optional[Cache],
+        cache_position: torch.Tensor,
+        position_embeddings_mapping: dict,
+        start_layer: int = 0,
+        end_layer: Optional[int] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Run a contiguous slice of the global backbone layers.
+
+        This is the single canonical implementation of the decoder-layer loop.
+        All depth strategies call this method; no other code should duplicate
+        the per-layer invocation logic.
+        """
+        if end_layer is None:
+            end_layer = self.config.num_hidden_layers
+        h = h_patch
+        for decoder_layer in self.layers[start_layer:end_layer]:
+            h = decoder_layer(
+                h,
+                attention_mask=causal_mask_mapping[decoder_layer.self_attn.attention_type],
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings_mapping[
+                    decoder_layer.self_attn.attention_type
+                ],
+                **kwargs,
+            )
+        return h
 
     def prefill_boundary_prediction_forward(
         self,
@@ -1006,16 +1045,22 @@ class BolmoModel(BolmoPreTrainedModel):
 
             h_patch_after_global = h_patch
 
-            for decoder_layer in self.layers[: self.config.num_hidden_layers]:
-                h_patch_after_global = decoder_layer(
-                    h_patch_after_global,
-                    attention_mask=causal_mask_mapping[decoder_layer.self_attn.attention_type],
-                    position_ids=position_ids,
-                    past_key_values=past_key_values,
-                    cache_position=cache_position,
-                    position_embeddings=position_embeddings_mapping[decoder_layer.self_attn.attention_type],
-                    **kwargs,
+
+            # --- adaptive depth hook (see adaptive_depth.py) ---
+            if self.global_backbone_strategy is not None:
+                h_patch_after_global = self.global_backbone_strategy(
+                    self, h_patch_after_global, causal_mask_mapping,
+                    position_ids, past_key_values, cache_position,
+                    position_embeddings_mapping, **kwargs,
                 )
+            else:
+                h_patch_after_global = self._run_global_layers(
+                    h_patch_after_global, causal_mask_mapping,
+                    position_ids, past_key_values, cache_position,
+                    position_embeddings_mapping, **kwargs,
+                )
+
+
 
             if boundary_mask is not None: # prefill
                 n_boundaries = boundary_mask.sum(-1)
